@@ -1,0 +1,481 @@
+---
+title: "5111 Project Code"
+output: pdf_document
+date: "2025-04-17"
+---
+
+```{r}
+# Data Cleaning and Merging
+library(dplyr)
+library(readr)
+library(stringr)
+library(janitor)
+library(ggplot2)
+library(tidyr)
+library(broom)
+library(tidyverse)
+library(ggrepel)
+library(changepoint)
+library(randomForest)
+
+setwd("C:/Users/allen/OneDrive/Desktop/5111 Project Final/Download Data")
+
+# List of files
+list.files()
+all_files <- list.files()
+all_files
+basic_files <- all_files[grepl("basic", all_files, ignore.case = TRUE)]
+advanced_files <- all_files[grepl("advanced", all_files, ignore.case = TRUE)]
+
+# Function to Read and Tag the Files
+read_and_tag <- function(file, type = "basic") {
+  year <- str_extract(file, "\\d{4}")
+  df <- read_csv(file, show_col_types = FALSE) %>%
+    mutate(year = as.integer(year)) %>%
+    clean_names() %>%
+    mutate(source = type)
+  return(df)
+}
+
+# Read all files into lists
+basic_list <- lapply(basic_files, read_and_tag, type = "basic")
+advanced_list <- lapply(advanced_files, read_and_tag, type = "advanced")
+
+# Merge each year's data
+basic_data <- bind_rows(basic_list)
+advanced_data <- bind_rows(advanced_list)
+
+# Show the head of the data
+head(basic_data)
+head(advanced_data)
+
+# Replace the column names of advanced data with the first row's values
+colnames(advanced_data) <- as.character(unlist(advanced_data[1, ]))
+advanced_data <- clean_names(advanced_data)
+head(advanced_data)
+# Drop NA columns and useless columns in both datasets
+advanced_data <- advanced_data %>%
+  select(-c(na, na_2, na_3, arena, attend, attend_g, advanced))
+
+basic_data <- basic_data %>%
+  select(-c(source))
+
+# Drop Column name lines that are in the dataset (simply remove rows where the team column has the word "Team")
+advanced_data <- advanced_data %>% filter(!team %in% c("Team"))
+
+# Manually change column names in advanced_data that is not clear
+advanced_data <- advanced_data %>%
+  rename(
+    o_e_fg_percent = e_fg_percent_2,
+    o_tov_percent = tov_percent_2,
+    o_ft_fga = ft_fga_2,
+    year = x1996
+  )
+
+# Remove asterisks from team names in both datasets
+basic_data$team <- gsub("\\*", "", basic_data$team)
+advanced_data$team <- gsub("\\*", "", advanced_data$team)
+
+# Check the team names are in desired and consistent format in both dataset
+unique(basic_data$team)
+unique(advanced_data$team)
+
+# Merge the two datasets
+nba_team_stats <- left_join(basic_data, advanced_data, by = c("team", "year"))
+
+# Drop the useless rk.x(ranking based on points per game) column and rename rk.y as rk (season ranking)
+nba_team_stats <- nba_team_stats %>%
+  select(-c(rk.x))
+
+nba_team_stats <- nba_team_stats %>%
+  rename(
+    rk = rk.y
+  )
+
+# Make sure all columns in the nba_team_stats dataset besides team and year are numeric
+nba_team_stats <- nba_team_stats %>%
+  mutate(across(
+    .cols = -c(team, year),           # everything except 'team' and 'year'
+    .fns  = ~ suppressWarnings(as.numeric(.))
+  ))
+
+str(nba_team_stats)
+
+head(nba_team_stats)
+
+# Create a csv file for the cleaned data
+write.csv(nba_team_stats, "nba_team_stats_merged_cleaned.csv", row.names = FALSE)
+
+# Create a league average dataset that only contains league average datas across 30 years
+league_avg <- nba_team_stats %>% filter(team == "League Average")
+
+# Drop the NA and meaningless columns in league_avg
+league_avg <- league_avg %>%
+  select(-c(rk, w, l, mov, n_rtg))
+
+head(league_avg)
+```
+
+```{r}
+# Plot League Average line graph
+# Extract all numeric variables only
+league_avg_numeric <- league_avg %>% select(where(is.numeric))
+
+# Change the dataset to long format
+league_avg_numeric_long <- league_avg_numeric %>% pivot_longer(cols = -year, names_to = "stat", values_to = "value")
+
+head(league_avg_numeric_long)
+
+#Plot all stats over time
+unique_stats <- unique(league_avg_numeric_long$stat)
+
+for (s in unique_stats) {
+  p <- ggplot(filter(league_avg_numeric_long, stat == s), aes(x = year, y = value)) +
+    geom_line(color = "blue", linewidth = 1) +
+    labs(
+      title = paste("League Average:", s),
+      x = "Year",
+      y = s
+    ) +
+    theme_minimal()
+  
+  print(p)
+}
+
+```
+
+```{r}
+# Trend One: NBA team's changes in shot selection
+
+# 1. Compare x3p vs x3pa vs x3p_percent in one plot
+# Modify values just before plotting
+x3p_plot_data <- league_avg_numeric_long %>%
+  filter(stat %in% c("x3pa", "x3p", "x3p_percent")) %>%
+  mutate(value = ifelse(stat == "x3p_percent", value * 100, value))
+# Plot
+ggplot(x3p_plot_data, aes(x = year, y = value, color = stat)) +
+  geom_line() +
+  labs(
+    title = "3P Makes, Attempts, and Percentage Over Time",
+    x = "Year",
+    y = "Value"
+  ) +
+  theme_minimal()
+
+```
+```{r}
+# 2. Compare x2p vs x2pa vs x2p_percent in one plot
+# Modify values just before plotting
+x2p_plot_data <- league_avg_numeric_long %>%
+  filter(stat %in% c("x2pa", "x2p", "x2p_percent")) %>%
+  mutate(value = ifelse(stat == "x2p_percent", value * 100, value))
+# Plot
+ggplot(x2p_plot_data, aes(x = year, y = value, color = stat)) +
+  geom_line(size = 1.1) +
+  labs(
+    title = "2P Makes, Attempts, and Percentage Over Time",
+    x = "Year",
+    y = "Value"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+# 3.The influence of changes in shot selection on rebounding dynamics
+
+# Modify values just before plotting
+rb_plot_data <- league_avg_numeric_long %>%
+  filter(stat %in% c("x3p_ar", "orb_percent", "drb_percent"))
+
+# Plot using facets
+ggplot(rb_plot_data, aes(x = year, y = value, color = stat)) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ stat, scales = "free_y", ncol = 1) +  
+  labs(
+    title = "Impact of 3-Point Era on Rebounding Dynamics",
+    x = "Season",
+    y = "Value",
+    color = "Stat"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+```
+
+```{r}
+# Trend Two: Change in Pace of the Game (Fast Pace Era)
+
+# 1.Line Graph of Key Variables with Highlighted Period
+# Modify values just before plotting
+pace_data <- league_avg_numeric_long %>%
+  filter(stat %in% c("pace", "fga", "trb", "ast", "pts"))
+
+# Line plot with highlighted area
+ggplot(pace_data, aes(x = year, y = value, color = stat)) +
+  geom_rect(data = NULL, aes(xmin = 2013, xmax = 2023, ymin = -Inf, ymax = Inf),
+            fill = "lightgray", alpha = 0.2, inherit.aes = FALSE) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ stat, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Fast Pace Era and Related Stat Trends",
+    subtitle = "Gray band highlights 2013–2023 surge",
+    x = "Season",
+    y = "Value"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+```
+```{r}
+# 2.Rate of Change Bar Plot (Four Time Periods)
+
+# Categorize the eras properly and exclude NAs
+league_with_era <- league_avg_numeric_long %>%
+  filter(stat %in% c("pace", "fga", "trb", "pts")) %>%
+  mutate(era = case_when(
+    year >= 1996 & year <= 2004 ~ "1996–2004",
+    year >= 2005 & year <= 2012 ~ "2005–2012",
+    year >= 2013 & year <= 2020 ~ "2013–2020",
+    year >= 2021 & year <= 2024 ~ "2021–2024"
+  )) %>%
+  filter(!is.na(era))  # Remove years that don't match any era
+
+# Fit linear models (value ~ year) for each stat and era
+era_slopes <- league_with_era %>%
+  group_by(stat, era) %>%
+  do(tidy(lm(value ~ year, data = .))) %>%
+  filter(term == "year") %>%
+  rename(rate_of_change = estimate) %>%
+  ungroup()
+
+# Reorder the x-axis factor so it shows up in order
+era_slopes$era <- factor(era_slopes$era, levels = c("1996–2004", "2005–2012", "2013–2020", "2021–2024"))
+
+# Final plot
+ggplot(era_slopes, aes(x = era, y = rate_of_change, fill = era)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ stat, scales = "free_y") +
+  labs(
+    title = "Rate of Change per Year for Key Pace Stats",
+    x = "Era",
+    y = "Slope (units per year)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    strip.text = element_text(face = "bold")
+  )
+
+# Thus we can conclude the pace is blooming in the period 2013-2020
+```
+```{r}
+# Trend Three: Offense Encouraged Era (Years After 2004)
+
+# Here we are talking about players' offense ability
+# 1. Line graph shows all variables related to offenseive ability
+# Filter Out Neccessary Data
+offense_data <- league_avg_numeric_long %>%
+  filter(stat %in% c("fg_percent", "x3p_percent", "x2p_percent", "fta", "f_tr", "e_fg_percent", "o_rtg")) %>%
+  mutate(era = ifelse(year >= 2005, "Post-2004", "Before 2005"))
+
+# Line Graph
+ggplot(offense_data, aes(x = year, y = value, color = stat)) +
+  geom_vline(xintercept = 2004, linetype = "dashed", color = "red", size = 1) +
+  geom_vline(xintercept = 2006, linetype = "dashed", color = "red", size = 1) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ stat, scales = "free_y") +
+  labs(
+    title = "Offensive Efficiency Trends Before and After 2004 Hand-Check Rule",
+    x = "Season",
+    y = "Stat Value"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+```{r}
+
+df <- nba_team_stats
+
+# delete 4 unrelated vars (win loss pw pl)
+df <- df %>%
+  select(-w, -l, -pw, -pl)
+
+# get mean of each var by year
+df_yearly <- df %>%
+  group_by(year) %>%
+  summarise(across(where(is.numeric), \(x) mean(x, na.rm = TRUE)))
+
+# standarlization
+years <- df_yearly$year
+df_scaled <- df_yearly %>%
+  select(-year) %>%
+  scale()
+
+# PCA model
+pca_result <- prcomp(df_scaled, center = TRUE, scale. = TRUE)
+summary(pca_result)
+
+# PC1 and PC2
+pca_scores <- as.data.frame(pca_result$x[, 1:2])
+pca_scores$year <- years
+
+# changepoint detection on PC1
+cp <- cpt.mean(pca_scores$PC1, method = "BinSeg", Q = 2)
+change_indices <- cpts(cp)
+change_years <- pca_scores$year[change_indices]
+print(paste("changepoints occur in the years:", paste(change_years, collapse = ", ")))
+
+# assign Eras to the years
+pca_scores <- pca_scores %>%
+  mutate(era = case_when(
+    year <= change_years[1] ~ "Era1",
+    year <= change_years[2] ~ "Era2",
+    TRUE ~ "Era3"
+  ))
+
+# loadings
+loadings <- as.data.frame(pca_result$rotation[, 1:2])
+loadings$varname <- rownames(loadings)
+
+# plot: PCA Super Biplot 
+era_colors <- c("Era1" = "#FFFACD", "Era2" = "#6495ED", "Era3" = "#8B0000")
+
+ggplot() +
+  geom_point(data = pca_scores, aes(x = PC1, y = PC2, fill = era),
+             shape = 21, size = 4, color = "black", stroke = 0.4) +
+  geom_text_repel(data = pca_scores, aes(x = PC1, y = PC2, label = year),
+                  size = 3.5, max.overlaps = 100, color = "black") +
+  geom_segment(data = loadings,
+               aes(x = 0, y = 0, xend = PC1, yend = PC2),
+               arrow = arrow(length = unit(0.25, "cm")),
+               color = "gray30", linewidth = 0.5) +
+  geom_text_repel(data = loadings,
+                  aes(x = PC1, y = PC2, label = varname),
+                  color = "black", size = 3.5, max.overlaps = 100) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_fill_manual(values = era_colors) +
+  labs(title = "PCA Super Biplot: NBA Team Style by Year and Variable Influence",
+       x = "PC1: Traditional -> Modern (3P, Pace, PTS)",
+       y = "PC2: Defense -> Offensive Efficiency",
+       fill = "Era") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "right")
+
+#  PC1 / PC2 top 10 vars
+loadings %>%
+  select(varname, PC1) %>%
+  arrange(desc(abs(PC1))) %>%
+  head(10)
+
+loadings %>%
+  select(varname, PC2) %>%
+  arrange(desc(abs(PC2))) %>%
+  head(10)
+
+# plot: changepoint on PC1
+ggplot(pca_scores, aes(x = year, y = PC1)) +
+  geom_line(color = "steelblue", linewidth = 1.2) +
+  geom_point(size = 2) +
+  geom_vline(xintercept = change_years, linetype = "dashed", color = "red") +
+  geom_text(aes(label = year), vjust = -0.7, size = 3) +
+  ggtitle("Changepoint Detection on PC1 Scores") +
+  ylab("PC1 Score") +
+  xlab("Year") +
+  theme_minimal()
+
+```
+
+```{r}
+
+# read data
+df <- nba_team_stats
+
+# null define Decade
+df$Decade <- NULL
+
+# separate three eras
+df$Decade <- ifelse(df$year >= 1996 & df$year <= 2007, "Era1",
+                    ifelse(df$year >= 2008 & df$year <= 2016, "Era2",
+                           ifelse(df$year >= 2017 & df$year <= 2025, "Era3", "Other")))
+
+df$Decade <- factor(df$Decade)
+
+
+# choose numeric var (delete year and decade)
+df_model <- df %>%
+  select(where(is.numeric)) %>%
+  select(-year) %>%
+  mutate(Decade = df$Decade)
+
+# 70% training data and 30% test data (random)
+set.seed(42)
+train_indices <- sample(nrow(df_model), 0.7 * nrow(df_model))
+train_data <- df_model[train_indices, ]
+train_data <- na.omit(train_data)
+test_data <- df_model[-train_indices, ]
+
+# Random Forest Model
+rf_model <- randomForest(Decade ~ ., data = train_data, importance = TRUE)
+
+# Random Forest Model Result
+print(rf_model)
+
+# Prediction and Accuracy
+predictions <- predict(rf_model, newdata = test_data)
+table(Predicted = predictions, Actual = test_data$Decade)
+accuracy <- mean(predictions == test_data$Decade)
+print(paste("Accuracy:", round(accuracy, 3)))
+
+# characteristics var importance (feature importance)
+print(importance(rf_model))  #feature importance
+
+rf_model <- randomForest(Decade ~ ., data = train_data, importance = TRUE)
+print(rf_model)
+
+
+
+top_vars <- c("drb_percent", "o_e_fg_percent", "x3p", "x3pa", "x3p_ar")
+
+## boxplots of top 5 var 
+df_long <- df %>%
+  filter(Decade %in% c("Era1", "Era2", "Era3")) %>%
+  pivot_longer(cols = all_of(top_vars), names_to = "variable", values_to = "value") %>%
+  mutate(variable = factor(variable, levels = c("drb_percent", "o_e_fg_percent", "x3p", "x3pa", "x3p_ar")))
+
+ggplot(df_long, aes(x = Decade, y = value, fill = Decade)) +
+  geom_boxplot(outlier.size = 1, linewidth = 0.3) +
+  facet_wrap(~variable, ncol = 3, scales = "free_y") +
+  labs(title = "Top Variables Across Eras (by Gini Importance)",
+       x = "Era", y = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "right",
+    strip.placement = "outside",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 11, face = "bold")
+  )
+
+
+             
+# var importance
+importance_df <- as.data.frame(importance(rf_model))
+importance_df$Variable <- rownames(importance_df)
+
+# Var Gini histogram
+importance_df %>%
+  arrange(desc(MeanDecreaseGini)) %>%
+  ggplot(aes(x = reorder(Variable, -MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Feature Importance (by MeanDecreaseGini)",
+       x = "Variable", y = "Gini Importance") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+                                  
+```
